@@ -1,9 +1,11 @@
+// index.js
 const express = require("express");
 const { instagramGetUrl } = require("instagram-url-direct");
 const cors = require("cors");
 const ffmpeg = require("fluent-ffmpeg");
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
 const axios = require("axios");
 
 const app = express();
@@ -14,7 +16,7 @@ app.get("/api/reel", async (req, res) => {
   if (!url) return res.status(400).json({ error: "Missing URL" });
 
   try {
-    // إزالة أي query params مثل utm_source
+    // إزالة أي query params
     url = url.split("?")[0];
 
     // استدعاء instagram-url-direct
@@ -25,8 +27,9 @@ app.get("/api/reel", async (req, res) => {
     const videoUrl = result.url_list[0];
 
     if (type === "audio") {
-      const tempVideoPath = path.join(__dirname, "temp.mp4");
-      const tempAudioPath = path.join(__dirname, "output.mp3");
+      // مسارات ملفات مؤقتة في tmp
+      const tempVideoPath = path.join(os.tmpdir(), `temp-${Date.now()}.mp4`);
+      const tempAudioPath = path.join(os.tmpdir(), `audio-${Date.now()}.mp3`);
 
       // تحميل الفيديو مؤقتًا
       const writer = fs.createWriteStream(tempVideoPath);
@@ -51,22 +54,23 @@ app.get("/api/reel", async (req, res) => {
       });
 
       // حذف الفيديو المؤقت بعد التحويل
-      fs.unlinkSync(tempVideoPath);
+      fs.unlink(tempVideoPath, () => {});
 
-      // إرسال ملف الصوت للمستخدم
+      // إرسال ملف الصوت للمستخدم ثم حذفه
       res.download(tempAudioPath, "audio.mp3", (err) => {
-        if (!err) fs.unlinkSync(tempAudioPath);
+        fs.unlink(tempAudioPath, () => {});
       });
     } else {
-      // إرسال رابط الفيديو مباشرة
-      res.json({ success: true, videoUrl });
+      // إعادة توجيه مباشرة للفيديو لتقليل الضغط على السيرفر
+      res.redirect(videoUrl);
     }
   } catch (err) {
-    console.error("Error in /api/reel:", err.message);
+    console.error("Error in /api/reel:", err);
     res.status(500).json({ error: "Failed to fetch video" });
   }
 });
 
+// ضبط البورت من البيئة أو 3000 محليًا
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ Instagram API running on port ${PORT}`);
