@@ -1,4 +1,3 @@
-const express = require("express");
 const { Telegraf } = require("telegraf");
 const axios = require("axios");
 const fs = require("fs");
@@ -6,12 +5,10 @@ const path = require("path");
 
 // قراءة المتغيرات من البيئة
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const BOT_URL = process.env.BOT_URL; // رابط HTTPS العام للبوت
 const API_URL = process.env.API_URL;
-const PORT = process.env.PORT || 3000;
 
-if (!BOT_TOKEN || !API_URL || !BOT_URL) {
-  console.error("❌ BOT_TOKEN, API_URL أو BOT_URL مفقود!");
+if (!BOT_TOKEN || !API_URL) {
+  console.error("❌ BOT_TOKEN أو API_URL مفقود!");
   process.exit(1);
 }
 
@@ -28,7 +25,7 @@ async function fetchWithRetry(url, retries = 3, delay = 1000, type = "json") {
         url,
         method: "GET",
         responseType: type === "stream" ? "stream" : "json",
-        timeout: 10000, // 10 ثواني timeout
+        timeout: 10000,
       });
       return response.data;
     } catch (err) {
@@ -53,7 +50,6 @@ bot.on("text", async (ctx) => {
 
   try {
     const key = Math.random().toString(36).substring(2, 10);
-    // رابط صالح لمدة 5 دقائق
     reels[key] = { url, expires: Date.now() + 5 * 60 * 1000 };
 
     ctx.reply("هل تريد تنزيله كـ فيديو أو صوت؟", {
@@ -91,8 +87,7 @@ bot.on("callback_query", async (ctx) => {
       const data = await fetchWithRetry(
         `${API_URL}/api/reel?url=${encodeURIComponent(url)}`
       );
-      const videoUrl = data.videoUrl;
-      await ctx.replyWithVideo({ url: videoUrl });
+      await ctx.replyWithVideo({ url: data.videoUrl });
     } catch (err) {
       console.error(err);
       ctx.reply("❌ فشل في جلب الفيديو. تحقق من الرابط.");
@@ -126,14 +121,9 @@ bot.on("callback_query", async (ctx) => {
   }
 });
 
-// **Express server** لتشغيل webhook
-const app = express();
-app.use(bot.webhookCallback("/")); // webhook عند root
+// **Polling** لتشغيل البوت
+bot.launch().then(() => console.log("✅ Telegram bot running!"));
 
-app.listen(PORT, async () => {
-  // تعيين webhook عند تشغيل السيرفر
-  await bot.telegram.setWebhook(`${BOT_URL}/`);
-  console.log(
-    `✅ Bot listening on port ${PORT} and webhook set to ${BOT_URL}/`
-  );
-});
+// لإيقاف البوت بشكل آمن
+process.once("SIGINT", () => bot.stop("SIGINT"));
+process.once("SIGTERM", () => bot.stop("SIGTERM"));
