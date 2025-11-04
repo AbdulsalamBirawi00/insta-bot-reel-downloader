@@ -14,6 +14,9 @@ if (!BOT_TOKEN || !API_URL) {
 
 const bot = new Telegraf(BOT_TOKEN);
 
+// كائن لتخزين روابط Reel مؤقتًا
+const reels = {};
+
 // أمر /start
 bot.start((ctx) => {
   ctx.reply("مرحبًا! أرسل لي رابط Reel من Instagram لتحميله كفيديو أو صوت.");
@@ -27,13 +30,17 @@ bot.on("text", async (ctx) => {
   }
 
   try {
+    // توليد مفتاح قصير ≤ 64 حرف لتجنب مشاكل callback_data
+    const key = Math.random().toString(36).substring(2, 10);
+    reels[key] = url;
+
     // إرسال رسالة اختيار الفيديو أو الصوت
     ctx.reply("هل تريد تنزيله كـ فيديو أو صوت؟", {
       reply_markup: {
         inline_keyboard: [
           [
-            { text: "🎥 فيديو", callback_data: `video|${url}` },
-            { text: "🎵 صوت", callback_data: `audio|${url}` },
+            { text: "🎥 فيديو", callback_data: `video|${key}` },
+            { text: "🎵 صوت", callback_data: `audio|${key}` },
           ],
         ],
       },
@@ -47,7 +54,10 @@ bot.on("text", async (ctx) => {
 // التعامل مع الأزرار
 bot.on("callback_query", async (ctx) => {
   const data = ctx.callbackQuery.data;
-  const [type, url] = data.split("|");
+  const [type, key] = data.split("|");
+  const url = reels[key];
+
+  if (!url) return ctx.reply("⚠️ الرابط غير موجود أو انتهت صلاحيته.");
 
   await ctx.answerCbQuery(); // لإغلاق مؤشر التحميل عند الضغط على الزر
 
