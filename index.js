@@ -3,32 +3,40 @@ const cors = require("cors");
 const ffmpeg = require("fluent-ffmpeg");
 const ffmpegPath = require("ffmpeg-static");
 const axios = require("axios");
-const igdl = require("@sasmeee/igdl");
 
 const app = express();
 app.use(cors());
 
-// ---------- Instagram Reel Endpoint ----------
 app.get("/api/reel", async (req, res) => {
   let { url, type } = req.query;
   if (!url) return res.status(400).json({ error: "Missing URL" });
 
   try {
-    // إزالة أي query params من الرابط
+    // إزالة أي query params
     url = url.split("?")[0];
 
-    // جلب روابط التحميل من إنستغرام
-    const result = await igdl(url);
+    // Instagram JSON endpoint for the post
+    const shortcode = url.split("/").filter(Boolean).pop(); // last path segment
+    const apiUrl = `https://www.instagram.com/p/${shortcode}/?__a=1&__d=dis`;
 
-    if (!result || !result[0] || !result[0].url) {
-      return res.status(404).json({ error: "Video not found" });
-    }
+    const response = await axios.get(apiUrl, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36",
+      },
+    });
 
-    const videoUrl = result[0].url;
+    const media = response.data?.graphql?.shortcode_media;
+    if (!media) return res.status(404).json({ error: "Video not found" });
+
+    const videoUrl =
+      media.video_url ||
+      media.edge_sidecar_to_children?.edges[0]?.node?.video_url;
+
+    if (!videoUrl) return res.status(404).json({ error: "Video not found" });
 
     if (type === "audio") {
-      // تحميل الفيديو وتحويله إلى صوت MP3 أثناء الـ stream
-      const response = await axios({
+      const videoStream = await axios({
         url: videoUrl,
         method: "GET",
         responseType: "stream",
@@ -37,7 +45,7 @@ app.get("/api/reel", async (req, res) => {
       res.setHeader("Content-Disposition", `attachment; filename="audio.mp3"`);
       res.setHeader("Content-Type", "audio/mpeg");
 
-      ffmpeg(response.data)
+      ffmpeg(videoStream.data)
         .setFfmpegPath(ffmpegPath)
         .format("mp3")
         .on("error", (err) => {
@@ -47,32 +55,24 @@ app.get("/api/reel", async (req, res) => {
         })
         .pipe(res, { end: true });
     } else {
-      // إرسال الفيديو مباشرة مع دعم range headers للتحميل الجزئي
-      const headers = {};
-      if (req.headers.range) headers.Range = req.headers.range;
-
-      const videoResponse = await axios({
+      const videoStream = await axios({
         url: videoUrl,
         method: "GET",
         responseType: "stream",
-        headers,
+        headers: req.headers.range ? { Range: req.headers.range } : {},
       });
 
-      if (videoResponse.headers["content-length"])
-        res.setHeader(
-          "Content-Length",
-          videoResponse.headers["content-length"]
-        );
-
-      if (videoResponse.headers["content-range"]) {
+      if (videoStream.headers["content-length"])
+        res.setHeader("Content-Length", videoStream.headers["content-length"]);
+      if (videoStream.headers["content-range"]) {
         res.status(206);
-        res.setHeader("Content-Range", videoResponse.headers["content-range"]);
+        res.setHeader("Content-Range", videoStream.headers["content-range"]);
       }
 
       res.setHeader("Content-Disposition", `attachment; filename="video.mp4"`);
       res.setHeader("Content-Type", "video/mp4");
 
-      videoResponse.data.pipe(res);
+      videoStream.data.pipe(res);
     }
   } catch (err) {
     console.error("Error in /api/reel:", err.message);
@@ -80,7 +80,6 @@ app.get("/api/reel", async (req, res) => {
   }
 });
 
-// ---------- Start Server ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ Instagram API running on port ${PORT}`);
