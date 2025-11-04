@@ -3,7 +3,7 @@ const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 
-// قراءة المتغيرات من Render Environment
+// قراءة المتغيرات من البيئة
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const API_URL = process.env.API_URL;
 
@@ -14,8 +14,27 @@ if (!BOT_TOKEN || !API_URL) {
 
 const bot = new Telegraf(BOT_TOKEN);
 
-// كائن لتخزين روابط Reel مؤقتًا
+// تخزين روابط Reel مؤقتًا مع صلاحية قصيرة
 const reels = {};
+
+// دالة fetch مع retry لتجنب مشاكل 502
+async function fetchWithRetry(url, retries = 3, delay = 1000, type = "json") {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const response = await axios({
+        url,
+        method: "GET",
+        responseType: type === "stream" ? "stream" : "json",
+        timeout: 10000, // 10 ثواني timeout
+      });
+      return response.data;
+    } catch (err) {
+      console.error(`Attempt ${attempt} failed:`, err.message);
+      if (attempt === retries) throw err;
+      await new Promise((res) => setTimeout(res, delay));
+    }
+  }
+}
 
 // أمر /start
 bot.start((ctx) => {
@@ -30,11 +49,10 @@ bot.on("text", async (ctx) => {
   }
 
   try {
-    // توليد مفتاح قصير ≤ 64 حرف لتجنب مشاكل callback_data
     const key = Math.random().toString(36).substring(2, 10);
-    reels[key] = url;
+    // رابط صالح لمدة 5 دقائق
+    reels[key] = { url, expires: Date.now() + 5 * 60 * 1000 };
 
-    // إرسال رسالة اختيار الفيديو أو الصوت
     ctx.reply("هل تريد تنزيله كـ فيديو أو صوت؟", {
       reply_markup: {
         inline_keyboard: [
@@ -55,18 +73,22 @@ bot.on("text", async (ctx) => {
 bot.on("callback_query", async (ctx) => {
   const data = ctx.callbackQuery.data;
   const [type, key] = data.split("|");
-  const url = reels[key];
+  const reel = reels[key];
 
-  if (!url) return ctx.reply("⚠️ الرابط غير موجود أو انتهت صلاحيته.");
+  if (!reel || reel.expires < Date.now()) {
+    return ctx.reply("⚠️ الرابط غير موجود أو انتهت صلاحيته.");
+  }
 
   await ctx.answerCbQuery(); // لإغلاق مؤشر التحميل عند الضغط على الزر
 
+  const url = reel.url;
+
   if (type === "video") {
     try {
-      const response = await axios.get(
+      const data = await fetchWithRetry(
         `${API_URL}/api/reel?url=${encodeURIComponent(url)}`
       );
-      const videoUrl = response.data.videoUrl;
+      const videoUrl = data.videoUrl;
       await ctx.replyWithVideo({ url: videoUrl });
     } catch (err) {
       console.error(err);
@@ -74,15 +96,16 @@ bot.on("callback_query", async (ctx) => {
     }
   } else if (type === "audio") {
     try {
-      const response = await axios({
-        url: `${API_URL}/api/reel?url=${encodeURIComponent(url)}&type=audio`,
-        method: "GET",
-        responseType: "stream",
-      });
+      const response = await fetchWithRetry(
+        `${API_URL}/api/reel?url=${encodeURIComponent(url)}&type=audio`,
+        3,
+        1000,
+        "stream"
+      );
 
-      const tempPath = path.join(__dirname, "temp_audio.mp3");
+      const tempPath = path.join(__dirname, `temp_audio_${key}.mp3`);
       const writer = fs.createWriteStream(tempPath);
-      response.data.pipe(writer);
+      response.pipe(writer);
 
       writer.on("finish", async () => {
         await ctx.replyWithAudio({ source: tempPath });
