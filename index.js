@@ -1,10 +1,9 @@
-// server.js
 const express = require("express");
-const { instagramGetUrl } = require("instagram-url-direct");
 const cors = require("cors");
 const ffmpeg = require("fluent-ffmpeg");
 const ffmpegPath = require("ffmpeg-static");
 const axios = require("axios");
+const igdl = require("@sasmeee/igdl");
 
 const app = express();
 app.use(cors());
@@ -15,17 +14,20 @@ app.get("/api/reel", async (req, res) => {
   if (!url) return res.status(400).json({ error: "Missing URL" });
 
   try {
-    // إزالة query params من الرابط
+    // إزالة أي query params من الرابط
     url = url.split("?")[0];
-    const result = await instagramGetUrl(url);
 
-    if (!result?.url_list?.length)
+    // جلب روابط التحميل من إنستغرام
+    const result = await igdl(url);
+
+    if (!result || !result[0] || !result[0].url) {
       return res.status(404).json({ error: "Video not found" });
+    }
 
-    const videoUrl = result.url_list[0];
+    const videoUrl = result[0].url;
 
     if (type === "audio") {
-      // تحويل الفيديو لصوت mp3 أثناء الـstream
+      // تحميل الفيديو وتحويله إلى صوت MP3 أثناء الـ stream
       const response = await axios({
         url: videoUrl,
         method: "GET",
@@ -41,11 +43,11 @@ app.get("/api/reel", async (req, res) => {
         .on("error", (err) => {
           console.error("FFmpeg error:", err);
           if (!res.headersSent)
-            res.status(500).json({ error: "Conversion failed" });
+            res.status(500).json({ error: "Audio conversion failed" });
         })
         .pipe(res, { end: true });
     } else {
-      // دعم resume للملفات الكبيرة باستخدام range headers
+      // إرسال الفيديو مباشرة مع دعم range headers للتحميل الجزئي
       const headers = {};
       if (req.headers.range) headers.Range = req.headers.range;
 
@@ -56,14 +58,14 @@ app.get("/api/reel", async (req, res) => {
         headers,
       });
 
-      // Content-Length و Content-Range
       if (videoResponse.headers["content-length"])
         res.setHeader(
           "Content-Length",
           videoResponse.headers["content-length"]
         );
+
       if (videoResponse.headers["content-range"]) {
-        res.status(206); // partial content
+        res.status(206);
         res.setHeader("Content-Range", videoResponse.headers["content-range"]);
       }
 
@@ -73,8 +75,8 @@ app.get("/api/reel", async (req, res) => {
       videoResponse.data.pipe(res);
     }
   } catch (err) {
-    console.error("Error in /api/reel:", err);
-    res.status(500).json({ error: "Failed to fetch video" });
+    console.error("Error in /api/reel:", err.message);
+    res.status(500).json({ error: "Failed to fetch media" });
   }
 });
 
