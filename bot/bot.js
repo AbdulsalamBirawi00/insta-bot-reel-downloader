@@ -1,7 +1,5 @@
 const { Telegraf } = require("telegraf");
 const axios = require("axios");
-const fs = require("fs");
-const path = require("path");
 
 // قراءة المتغيرات من البيئة
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -17,17 +15,22 @@ const bot = new Telegraf(BOT_TOKEN);
 // تخزين روابط Reel مؤقتًا مع صلاحية قصيرة
 const reels = {};
 
-// دالة fetch مع retry لتجنب مشاكل 502
-async function fetchWithRetry(url, retries = 3, delay = 1000, type = "json") {
+// دالة fetch مع retry
+async function fetchWithRetry(
+  url,
+  retries = 3,
+  delay = 1000,
+  responseType = "json"
+) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       const response = await axios({
         url,
         method: "GET",
-        responseType: type === "stream" ? "stream" : "json",
-        timeout: 10000, // 10 ثواني timeout
+        responseType,
+        timeout: 10000,
       });
-      return response.data;
+      return responseType === "stream" ? response : response.data;
     } catch (err) {
       console.error(`Attempt ${attempt} failed:`, err.message);
       if (attempt === retries) throw err;
@@ -48,25 +51,20 @@ bot.on("text", async (ctx) => {
     return ctx.reply("⚠️ الرابط غير صالح. أرسل رابط Reel صالح من Instagram.");
   }
 
-  try {
-    const key = Math.random().toString(36).substring(2, 10);
-    // رابط صالح لمدة 5 دقائق
-    reels[key] = { url, expires: Date.now() + 5 * 60 * 1000 };
+  const key = Math.random().toString(36).substring(2, 10);
+  // رابط صالح لمدة 5 دقائق
+  reels[key] = { url, expires: Date.now() + 5 * 60 * 1000 };
 
-    ctx.reply("هل تريد تنزيله كـ فيديو أو صوت؟", {
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: "🎥 فيديو", callback_data: `video|${key}` },
-            { text: "🎵 صوت", callback_data: `audio|${key}` },
-          ],
+  ctx.reply("هل تريد تنزيله كـ فيديو أو صوت؟", {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: "🎥 فيديو", callback_data: `video|${key}` },
+          { text: "🎵 صوت", callback_data: `audio|${key}` },
         ],
-      },
-    });
-  } catch (err) {
-    console.error(err);
-    ctx.reply("❌ حدث خطأ، حاول مرة أخرى.");
-  }
+      ],
+    },
+  });
 });
 
 // التعامل مع الأزرار
@@ -80,22 +78,20 @@ bot.on("callback_query", async (ctx) => {
   }
 
   await ctx.answerCbQuery(); // لإغلاق مؤشر التحميل عند الضغط على الزر
-
   const url = reel.url;
 
-  if (type === "video") {
-    try {
-      const data = await fetchWithRetry(
-        `${API_URL}/api/reel?url=${encodeURIComponent(url)}`
+  try {
+    if (type === "video") {
+      const response = await fetchWithRetry(
+        `${API_URL}/api/reel?url=${encodeURIComponent(url)}`,
+        3,
+        1000,
+        "stream"
       );
-      const videoUrl = data.videoUrl;
-      await ctx.replyWithVideo({ url: videoUrl });
-    } catch (err) {
-      console.error(err);
-      ctx.reply("❌ فشل في جلب الفيديو. تحقق من الرابط.");
-    }
-  } else if (type === "audio") {
-    try {
+
+      // إرسال الفيديو مباشرة للبوت
+      await ctx.replyWithVideo({ source: response.data });
+    } else if (type === "audio") {
       const response = await fetchWithRetry(
         `${API_URL}/api/reel?url=${encodeURIComponent(url)}&type=audio`,
         3,
@@ -103,23 +99,12 @@ bot.on("callback_query", async (ctx) => {
         "stream"
       );
 
-      const tempPath = path.join(__dirname, `temp_audio_${key}.mp3`);
-      const writer = fs.createWriteStream(tempPath);
-      response.pipe(writer);
-
-      writer.on("finish", async () => {
-        await ctx.replyWithAudio({ source: tempPath });
-        fs.unlinkSync(tempPath);
-      });
-
-      writer.on("error", (err) => {
-        console.error(err);
-        ctx.reply("❌ حدث خطأ أثناء تحميل الصوت.");
-      });
-    } catch (err) {
-      console.error(err);
-      ctx.reply("❌ حدث خطأ أثناء تحويل الصوت.");
+      // إرسال الصوت مباشرة للبوت
+      await ctx.replyWithAudio({ source: response.data });
     }
+  } catch (err) {
+    console.error(err);
+    ctx.reply("❌ حدث خطأ أثناء التحميل. حاول لاحقًا.");
   }
 });
 
