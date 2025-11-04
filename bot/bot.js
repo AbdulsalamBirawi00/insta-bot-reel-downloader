@@ -1,12 +1,17 @@
+const express = require("express");
 const { Telegraf } = require("telegraf");
 const axios = require("axios");
+const fs = require("fs");
+const path = require("path");
 
 // قراءة المتغيرات من البيئة
 const BOT_TOKEN = process.env.BOT_TOKEN;
+const BOT_URL = process.env.BOT_URL; // رابط HTTPS العام للبوت
 const API_URL = process.env.API_URL;
+const PORT = process.env.PORT || 3000;
 
-if (!BOT_TOKEN || !API_URL) {
-  console.error("❌ BOT_TOKEN or API_URL is missing!");
+if (!BOT_TOKEN || !API_URL || !BOT_URL) {
+  console.error("❌ BOT_TOKEN, API_URL أو BOT_URL مفقود!");
   process.exit(1);
 }
 
@@ -15,22 +20,17 @@ const bot = new Telegraf(BOT_TOKEN);
 // تخزين روابط Reel مؤقتًا مع صلاحية قصيرة
 const reels = {};
 
-// دالة fetch مع retry
-async function fetchWithRetry(
-  url,
-  retries = 3,
-  delay = 1000,
-  responseType = "json"
-) {
+// دالة fetch مع retry لتجنب مشاكل 502
+async function fetchWithRetry(url, retries = 3, delay = 1000, type = "json") {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       const response = await axios({
         url,
         method: "GET",
-        responseType,
-        timeout: 10000,
+        responseType: type === "stream" ? "stream" : "json",
+        timeout: 10000, // 10 ثواني timeout
       });
-      return responseType === "stream" ? response : response.data;
+      return response.data;
     } catch (err) {
       console.error(`Attempt ${attempt} failed:`, err.message);
       if (attempt === retries) throw err;
@@ -51,20 +51,25 @@ bot.on("text", async (ctx) => {
     return ctx.reply("⚠️ الرابط غير صالح. أرسل رابط Reel صالح من Instagram.");
   }
 
-  const key = Math.random().toString(36).substring(2, 10);
-  // رابط صالح لمدة 5 دقائق
-  reels[key] = { url, expires: Date.now() + 5 * 60 * 1000 };
+  try {
+    const key = Math.random().toString(36).substring(2, 10);
+    // رابط صالح لمدة 5 دقائق
+    reels[key] = { url, expires: Date.now() + 5 * 60 * 1000 };
 
-  ctx.reply("هل تريد تنزيله كـ فيديو أو صوت؟", {
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: "🎥 فيديو", callback_data: `video|${key}` },
-          { text: "🎵 صوت", callback_data: `audio|${key}` },
+    ctx.reply("هل تريد تنزيله كـ فيديو أو صوت؟", {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "🎥 فيديو", callback_data: `video|${key}` },
+            { text: "🎵 صوت", callback_data: `audio|${key}` },
+          ],
         ],
-      ],
-    },
-  });
+      },
+    });
+  } catch (err) {
+    console.error(err);
+    ctx.reply("❌ حدث خطأ، حاول مرة أخرى.");
+  }
 });
 
 // التعامل مع الأزرار
@@ -77,21 +82,23 @@ bot.on("callback_query", async (ctx) => {
     return ctx.reply("⚠️ الرابط غير موجود أو انتهت صلاحيته.");
   }
 
-  await ctx.answerCbQuery(); // لإغلاق مؤشر التحميل عند الضغط على الزر
+  await ctx.answerCbQuery();
+
   const url = reel.url;
 
-  try {
-    if (type === "video") {
-      const response = await fetchWithRetry(
-        `${API_URL}/api/reel?url=${encodeURIComponent(url)}`,
-        3,
-        1000,
-        "stream"
+  if (type === "video") {
+    try {
+      const data = await fetchWithRetry(
+        `${API_URL}/api/reel?url=${encodeURIComponent(url)}`
       );
-
-      // إرسال الفيديو مباشرة للبوت
-      await ctx.replyWithVideo({ source: response.data });
-    } else if (type === "audio") {
+      const videoUrl = data.videoUrl;
+      await ctx.replyWithVideo({ url: videoUrl });
+    } catch (err) {
+      console.error(err);
+      ctx.reply("❌ فشل في جلب الفيديو. تحقق من الرابط.");
+    }
+  } else if (type === "audio") {
+    try {
       const response = await fetchWithRetry(
         `${API_URL}/api/reel?url=${encodeURIComponent(url)}&type=audio`,
         3,
@@ -99,18 +106,34 @@ bot.on("callback_query", async (ctx) => {
         "stream"
       );
 
-      // إرسال الصوت مباشرة للبوت
-      await ctx.replyWithAudio({ source: response.data });
+      const tempPath = path.join(__dirname, `temp_audio_${key}.mp3`);
+      const writer = fs.createWriteStream(tempPath);
+      response.pipe(writer);
+
+      writer.on("finish", async () => {
+        await ctx.replyWithAudio({ source: tempPath });
+        fs.unlinkSync(tempPath);
+      });
+
+      writer.on("error", (err) => {
+        console.error(err);
+        ctx.reply("❌ حدث خطأ أثناء تحميل الصوت.");
+      });
+    } catch (err) {
+      console.error(err);
+      ctx.reply("❌ حدث خطأ أثناء تحويل الصوت.");
     }
-  } catch (err) {
-    console.error(err);
-    ctx.reply("❌ حدث خطأ أثناء التحميل. حاول لاحقًا.");
   }
 });
 
-// تشغيل البوت
-bot.launch().then(() => console.log("✅ Telegram bot running!"));
+// **Express server** لتشغيل webhook
+const app = express();
+app.use(bot.webhookCallback("/")); // webhook عند root
 
-// لإيقاف البوت بشكل آمن
-process.once("SIGINT", () => bot.stop("SIGINT"));
-process.once("SIGTERM", () => bot.stop("SIGTERM"));
+app.listen(PORT, async () => {
+  // تعيين webhook عند تشغيل السيرفر
+  await bot.telegram.setWebhook(`${BOT_URL}/`);
+  console.log(
+    `✅ Bot listening on port ${PORT} and webhook set to ${BOT_URL}/`
+  );
+});
